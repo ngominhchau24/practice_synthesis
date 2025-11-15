@@ -12,6 +12,28 @@ This lab implements a complete synthesis flow from Boolean function specificatio
 4. **Synthesize SystemVerilog** module and exhaustive testbench
 5. **Simulate** with any SystemVerilog-compatible simulator
 
+## BDD Implementation
+
+This lab uses a **simplified custom BDD implementation** focused on synthesis (not general BDD manipulation). The implementation prioritizes clarity and understanding over optimization.
+
+**For production use or larger circuits**, consider using an optimized BDD library:
+
+```bash
+# Option 1: dd package (recommended)
+pip install dd
+
+# Option 2: pyeda package
+pip install pyeda
+```
+
+These libraries provide:
+- Variable reordering for smaller BDDs
+- Optimized C backends for speed
+- Advanced BDD operations
+- Industry-standard algorithms
+
+The current implementation is **dependency-free** and sufficient for educational purposes and moderate-sized circuits (up to 10-15 variables).
+
 ## Key Concepts
 
 ### Binary Decision Diagram (BDD)
@@ -124,18 +146,24 @@ Each BDD node's ITE operation maps to standard logic gates:
 
 ```
 lab3/
-├── __init__.py         - Package exports
-├── main.py             - CLI orchestrator
-├── bdd.py              - BDD data structure & ITE operations
-├── ite_table.py        - ITE-to-gate lookup table
-├── netlist.py          - Gate-level netlist generation
-├── verilog_gen.py      - SystemVerilog code generator
-└── README.md           - This file
+├── __init__.py            - Package exports (22 lines)
+├── main.py                - CLI orchestrator (283 lines)
+├── bdd.py                 - Simplified BDD implementation (210 lines)
+├── ite_table.py           - ITE-to-gate lookup table (170 lines)
+├── netlist.py             - Gate-level netlist generation (191 lines)
+├── verilog_gen.py         - SystemVerilog code generator (290 lines)
+├── connection_example.py  - Example showing gate connections (160 lines)
+├── CONNECTION_EXPLAINED.md - Detailed connection documentation
+└── README.md              - This file
 
 output/                 - Generated files (auto-created)
 ├── *.sv                - SystemVerilog modules
 └── *_tb.sv             - SystemVerilog testbenches
+
+requirements.txt        - Optional dependencies (dd, pyeda)
 ```
+
+**Total code: ~1,326 lines** (BDD simplified to 210 lines, down from 277)
 
 ## Usage
 

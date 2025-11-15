@@ -1,0 +1,18 @@
+# Lab 3: BDD-based Netlist Generation
+# Optional dependencies for optimized BDD operations
+
+# Recommended BDD library (optional but recommended for production):
+# dd>=0.5.6          # Optimized BDD with automatic variable reordering
+# OR
+# pyeda>=0.28.0      # Alternative BDD library with Espresso integration
+
+# Note: The current implementation uses a simplified built-in BDD
+# to avoid dependencies. For better optimization and larger circuits,
+# install one of the above packages.
+
+# Installation:
+#   pip install dd  # Recommended
+#   OR
+#   pip install pyeda
+
+# No dependencies required for basic functionality
