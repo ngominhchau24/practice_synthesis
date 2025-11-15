@@ -96,8 +96,10 @@ class VerilogGenerator:
             f.write("\n")
 
     def _write_gate_instances(self, f: TextIO):
-        """Write gate instances."""
-        f.write("    // Gate instances\n")
+        """Write gate instances using standard cell primitives."""
+        f.write("    // Gate instances (standard cells)\n")
+
+        self.mux_wire_counter = 0  # Counter for MUX decomposition wires
 
         for i, gate in enumerate(self.netlist.gates):
             self._write_gate_instance(f, gate, i)
@@ -105,7 +107,7 @@ class VerilogGenerator:
         f.write("\n")
 
     def _write_gate_instance(self, f: TextIO, gate: Gate, index: int):
-        """Write a single gate instance.
+        """Write a single gate instance using standard cell primitives.
 
         Args:
             f: File handle
@@ -122,35 +124,51 @@ class VerilogGenerator:
             else:
                 inputs.append(inp)
 
+        # Use Verilog standard cell primitives
         if gate.gate_type == GateType.BUFFER:
-            f.write(f"    assign {gate.output} = {inputs[0]};\n")
+            f.write(f"    buf g{index} ({gate.output}, {inputs[0]});\n")
 
         elif gate.gate_type == GateType.NOT:
-            f.write(f"    assign {gate.output} = ~{inputs[0]};\n")
+            f.write(f"    not g{index} ({gate.output}, {inputs[0]});\n")
 
         elif gate.gate_type == GateType.AND:
-            f.write(f"    assign {gate.output} = {inputs[0]} & {inputs[1]};\n")
+            f.write(f"    and g{index} ({gate.output}, {inputs[0]}, {inputs[1]});\n")
 
         elif gate.gate_type == GateType.OR:
-            f.write(f"    assign {gate.output} = {inputs[0]} | {inputs[1]};\n")
+            f.write(f"    or g{index} ({gate.output}, {inputs[0]}, {inputs[1]});\n")
 
         elif gate.gate_type == GateType.NAND:
-            f.write(f"    assign {gate.output} = ~({inputs[0]} & {inputs[1]});\n")
+            f.write(f"    nand g{index} ({gate.output}, {inputs[0]}, {inputs[1]});\n")
 
         elif gate.gate_type == GateType.NOR:
-            f.write(f"    assign {gate.output} = ~({inputs[0]} | {inputs[1]});\n")
+            f.write(f"    nor g{index} ({gate.output}, {inputs[0]}, {inputs[1]});\n")
 
         elif gate.gate_type == GateType.XOR:
-            f.write(f"    assign {gate.output} = {inputs[0]} ^ {inputs[1]};\n")
+            f.write(f"    xor g{index} ({gate.output}, {inputs[0]}, {inputs[1]});\n")
 
         elif gate.gate_type == GateType.XNOR:
-            f.write(f"    assign {gate.output} = ~({inputs[0]} ^ {inputs[1]});\n")
+            f.write(f"    xnor g{index} ({gate.output}, {inputs[0]}, {inputs[1]});\n")
 
         elif gate.gate_type == GateType.MUX:
-            # MUX: out = sel ? in1 : in0
-            # ITE(sel, in1, in0)
-            sel, in1, in0 = inputs[0], inputs[1], inputs[2]
-            f.write(f"    assign {gate.output} = {sel} ? {in1} : {in0};\n")
+            # Decompose MUX into standard cells
+            # MUX: out = sel ? a : b
+            # out = (sel & a) | (~sel & b)
+            sel, a, b = inputs[0], inputs[1], inputs[2]
+
+            # Generate intermediate wire names
+            sel_n = f"mux{self.mux_wire_counter}_sel_n"
+            sel_and_a = f"mux{self.mux_wire_counter}_and0"
+            sel_n_and_b = f"mux{self.mux_wire_counter}_and1"
+            self.mux_wire_counter += 1
+
+            # Declare intermediate wires
+            f.write(f"    wire {sel_n}, {sel_and_a}, {sel_n_and_b};\n")
+
+            # Decompose: out = (sel & a) | (~sel & b)
+            f.write(f"    not g{index}_0 ({sel_n}, {sel});\n")
+            f.write(f"    and g{index}_1 ({sel_and_a}, {sel}, {a});\n")
+            f.write(f"    and g{index}_2 ({sel_n_and_b}, {sel_n}, {b});\n")
+            f.write(f"    or g{index}_3 ({gate.output}, {sel_and_a}, {sel_n_and_b});\n")
 
     def _write_module_footer(self, f: TextIO):
         """Write module footer."""
