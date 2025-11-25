@@ -117,19 +117,26 @@ def run_bdd_synthesis(
 
         module_name = f"{_safe_stem(path)}_{output_name}"
         sv_module_file = os.path.join(output_dir, f"{module_name}.sv")
+        sv_golden_file = os.path.join(output_dir, f"golden_model.v")
         sv_tb_file = os.path.join(output_dir, f"{module_name}_tb.sv")
 
         vgen = VerilogGenerator(netlist, module_name=module_name, output_name=output_name)
 
-        # Generate module
+        # Generate netlist module (DUT)
         vgen.generate_module(sv_module_file)
 
-        # Generate testbench with expected outputs
+        # Generate behavioral golden model
         expected_outputs = _build_expected_outputs(inputs_bits, outputs_trits, output_idx)
-        vgen.generate_testbench(sv_tb_file, expected_outputs)
+        vgen.generate_golden_model(sv_golden_file, expected_outputs)
 
-        print(f"  Module: {sv_module_file}")
-        print(f"  Testbench: {sv_tb_file}")
+        # Generate co-simulation testbench (random stimulus)
+        num_random_tests = 1000  # Number of random test vectors
+        vgen.generate_testbench(sv_tb_file, num_random_tests)
+
+        print(f"  Netlist (DUT):   {sv_module_file}")
+        print(f"  Golden Model:    {sv_golden_file}")
+        print(f"  Testbench:       {sv_tb_file}")
+        print(f"  Random tests:    {num_random_tests} vectors")
         print()
 
     print("=" * 60)
@@ -142,9 +149,12 @@ def run_bdd_synthesis(
     for output_name in out_names:
         module_name = f"{_safe_stem(path)}_{output_name}"
         print(f"  # For {output_name}:")
-        print(f"    iverilog -g2012 -o sim {module_name}.sv {module_name}_tb.sv")
-        print(f"    ./sim")
+        print(f"    iverilog -g2012 -o sim {module_name}.sv golden_model.v {module_name}_tb.sv")
+        print(f"    vvp sim")
         print()
+    print("Note: Testbench uses random stimulus and co-simulation")
+    print("      DUT (netlist) vs Golden Model (behavioral)")
+    print()
 
 
 def _extract_sets_for_output(

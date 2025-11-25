@@ -2,8 +2,9 @@
 SystemVerilog code generation from gate-level netlist.
 
 Generates:
-1. Structural SystemVerilog module from netlist
-2. Testbench for exhaustive simulation
+1. Structural SystemVerilog module from netlist (DUT)
+2. Behavioral golden model for reference
+3. Testbench with random stimulus and co-simulation
 """
 
 from __future__ import annotations
@@ -206,45 +207,199 @@ class VerilogGenerator:
         """Write module footer."""
         f.write("endmodule\n")
 
-    def generate_testbench(self, filename: str, expected_outputs: List[int]):
-        """Generate SystemVerilog testbench with exhaustive testing.
+    def generate_golden_model(self, filename: str, truth_table: List[int]):
+        """Generate behavioral golden model from truth table.
+
+        Args:
+            filename: Output .v file path for golden model
+            truth_table: Expected output for each input combination
+        """
+        with open(filename, 'w') as f:
+            self._write_golden_header(f)
+            self._write_golden_logic(f, truth_table)
+            self._write_golden_footer(f)
+
+        print(f"Generated golden model: {filename}")
+
+    def _write_golden_header(self, f: TextIO):
+        """Write golden model header."""
+        f.write("// Behavioral golden model (reference implementation)\n")
+        f.write(f"// Auto-generated from truth table\n\n")
+        f.write("module ref_model (\n")
+
+        # Input ports
+        for i, var in enumerate(self.netlist.var_names):
+            f.write(f"    input  {var},\n")
+
+        # Output port
+        f.write(f"    output {self.output_name}\n")
+        f.write(");\n\n")
+
+    def _write_golden_logic(self, f: TextIO, truth_table: List[int]):
+        """Write behavioral logic using truth table.
+
+        Uses a case statement for clarity and direct mapping from truth table.
+        """
+        num_inputs = self.netlist.num_inputs
+
+        # Concatenate inputs for case statement
+        input_concat = "{" + ", ".join(self.netlist.var_names) + "}"
+
+        f.write("    // Behavioral implementation using truth table\n")
+        f.write(f"    reg {self.output_name}_reg;\n\n")
+        f.write("    always @(*) begin\n")
+        f.write(f"        case ({input_concat})\n")
+
+        # Generate case for each input combination
+        for i in range(2 ** num_inputs):
+            pattern = format(i, f'0{num_inputs}b')
+            output_val = truth_table[i] if i < len(truth_table) else 0
+
+            # Format: 3'b000: out_reg = 1'b0;
+            f.write(f"            {num_inputs}'b{pattern}: {self.output_name}_reg = 1'b{output_val};\n")
+
+        f.write("            default: {}_reg = 1'bx;\n".format(self.output_name))
+        f.write("        endcase\n")
+        f.write("    end\n\n")
+        f.write(f"    assign {self.output_name} = {self.output_name}_reg;\n\n")
+
+    def _write_golden_footer(self, f: TextIO):
+        """Write golden model footer."""
+        f.write("endmodule\n")
+
+    def generate_testbench(self, filename: str, num_random_tests: int = 1000):
+        """Generate SystemVerilog testbench with random stimulus and co-simulation.
 
         Args:
             filename: Output testbench .sv file path
-            expected_outputs: Expected output for each input combination
+            num_random_tests: Number of random test vectors (default: 1000)
         """
         with open(filename, 'w') as f:
-            self._write_tb_header(f)
-            self._write_tb_signals(f)
-            self._write_tb_dut(f)
-            self._write_tb_test(f, expected_outputs)
-            self._write_tb_footer(f)
+            self._write_tb_cosim_header(f)
+            self._write_tb_cosim_signals(f)
+            self._write_tb_cosim_instances(f)
+            self._write_tb_cosim_test(f, num_random_tests)
+            self._write_tb_cosim_footer(f)
 
-        print(f"Generated SystemVerilog testbench: {filename}")
+        print(f"Generated co-simulation testbench: {filename}")
 
-    def _write_tb_header(self, f: TextIO):
-        """Write testbench header."""
-        f.write(f"// Testbench for {self.module_name}\n")
-        f.write(f"// Exhaustive simulation of all {2 ** self.netlist.num_inputs} input combinations\n\n")
+    def _write_tb_cosim_header(self, f: TextIO):
+        """Write co-simulation testbench header."""
+        f.write(f"// Co-simulation testbench for {self.module_name}\n")
+        f.write(f"// Compares gate-level netlist (DUT) against behavioral golden model\n")
+        f.write(f"// Uses random stimulus for verification\n\n")
         f.write(f"module {self.module_name}_tb;\n\n")
 
-    def _write_tb_signals(self, f: TextIO):
-        """Write testbench signals."""
+    def _write_tb_cosim_signals(self, f: TextIO):
+        """Write co-simulation testbench signals."""
         f.write("    // Testbench signals\n")
         for var in self.netlist.var_names:
             f.write(f"    logic {var};\n")
-        f.write(f"    logic {self.output_name};\n")
-        f.write("    logic expected;\n")
-        f.write("    int errors = 0;\n\n")
+        f.write(f"\n")
+        f.write(f"    // DUT outputs\n")
+        f.write(f"    logic dut_{self.output_name};\n")
+        f.write(f"\n")
+        f.write(f"    // Golden model outputs\n")
+        f.write(f"    logic ref_{self.output_name};\n")
+        f.write(f"\n")
+        f.write("    int errors = 0;\n")
+        f.write("    int test_count = 0;\n\n")
 
-    def _write_tb_dut(self, f: TextIO):
-        """Write DUT instantiation."""
-        f.write("    // DUT instantiation\n")
+    def _write_tb_cosim_instances(self, f: TextIO):
+        """Write DUT and golden model instantiations."""
+        # DUT (netlist) instantiation
+        f.write("    // DUT: Gate-level netlist\n")
         f.write(f"    {self.module_name} dut (\n")
-        for i, var in enumerate(self.netlist.var_names):
+        for var in self.netlist.var_names:
             f.write(f"        .{var}({var}),\n")
-        f.write(f"        .{self.output_name}({self.output_name})\n")
+        f.write(f"        .{self.output_name}(dut_{self.output_name})\n")
         f.write("    );\n\n")
+
+        # Golden model instantiation
+        f.write("    // Golden Model: Behavioral reference\n")
+        f.write("    ref_model u_ref (\n")
+        for var in self.netlist.var_names:
+            f.write(f"        .{var}({var}),\n")
+        f.write(f"        .{self.output_name}(ref_{self.output_name})\n")
+        f.write("    );\n\n")
+
+    def _write_tb_cosim_test(self, f: TextIO, num_tests: int):
+        """Write random stimulus test with co-simulation.
+
+        Args:
+            f: File handle
+            num_tests: Number of random test vectors
+        """
+        num_inputs = self.netlist.num_inputs
+
+        f.write("    // Test stimulus with random inputs\n")
+        f.write("    initial begin\n")
+        f.write("        $display(\"=\" * 70);\n")
+        f.write("        $display(\"Co-Simulation Testbench\");\n")
+        f.write("        $display(\"DUT: Gate-level netlist\");\n")
+        f.write("        $display(\"REF: Behavioral golden model\");\n")
+        f.write("        $display(\"=\" * 70);\n")
+        f.write("        $display(\"\");\n\n")
+
+        # Random seed
+        f.write("        // Initialize random seed\n")
+        f.write("        $display(\"Starting random verification with %0d test vectors...\", {});\n".format(num_tests))
+        f.write("        $display(\"\");\n\n")
+
+        # Test loop
+        f.write(f"        repeat ({num_tests}) begin\n")
+        f.write("            // Generate random inputs\n")
+
+        for var in self.netlist.var_names:
+            f.write(f"            {var} = $random;\n")
+
+        f.write("            #10;  // Wait for propagation\n\n")
+
+        f.write("            // Compare outputs\n")
+        f.write("            test_count++;\n")
+        f.write(f"            if (dut_{self.output_name} !== ref_{self.output_name}) begin\n")
+        f.write("                errors++;\n")
+
+        # Format error message
+        input_display = "  ".join([f"%b" for _ in self.netlist.var_names])
+        f.write(f"                $display(\"ERROR [Test %0d]: Mismatch!\", test_count);\n")
+        f.write(f"                $display(\"  Inputs:  {input_display}\", {', '.join(self.netlist.var_names)});\n")
+        f.write(f"                $display(\"  DUT out: %b\", dut_{self.output_name});\n")
+        f.write(f"                $display(\"  REF out: %b\", ref_{self.output_name});\n")
+        f.write("                $display(\"\");\n")
+        f.write("            end\n")
+
+        # Progress indicator (every 100 tests)
+        f.write("            if (test_count % 100 == 0)\n")
+        f.write("                $display(\"  Progress: %0d/%0d tests completed...\", test_count, {});\n".format(num_tests))
+
+        f.write("        end\n\n")
+
+        # Final report
+        f.write("        $display(\"\");\n")
+        f.write("        $display(\"=\" * 70);\n")
+        f.write("        $display(\"Test Summary\");\n")
+        f.write("        $display(\"=\" * 70);\n")
+        f.write("        $display(\"Total tests: %0d\", test_count);\n")
+        f.write("        $display(\"Passed:      %0d\", test_count - errors);\n")
+        f.write("        $display(\"Failed:      %0d\", errors);\n")
+        f.write("        $display(\"\");\n\n")
+
+        f.write("        if (errors == 0) begin\n")
+        f.write("            $display(\"*** VERIFICATION PASSED ***\");\n")
+        f.write("            $display(\"DUT matches golden model on all test vectors!\");\n")
+        f.write("        end else begin\n")
+        f.write("            $display(\"*** VERIFICATION FAILED ***\");\n")
+        f.write("            $display(\"%0d mismatches detected!\", errors);\n")
+        f.write("        end\n")
+        f.write("        $display(\"=\" * 70);\n\n")
+
+        f.write("        $finish;\n")
+        f.write("    end\n\n")
+
+    def _write_tb_cosim_footer(self, f: TextIO):
+        """Write co-simulation testbench footer."""
+        f.write("endmodule\n")
 
     def _write_tb_test(self, f: TextIO, expected_outputs: List[int]):
         """Write test stimulus and checking.
