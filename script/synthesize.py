@@ -95,9 +95,18 @@ def synthesize(spec_file, n_inputs, output_first_function_only=True):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    netlist_file = os.path.join(project_root, "src", "netlist.sv")
-    model_file = os.path.join(project_root, "model", "ref_model.v")
-    tb_file = os.path.join(project_root, "tb", "testbench.sv")
+    # Create directories if they don't exist
+    src_dir = os.path.join(project_root, "src")
+    model_dir = os.path.join(project_root, "model")
+    tb_dir = os.path.join(project_root, "tb")
+
+    os.makedirs(src_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(tb_dir, exist_ok=True)
+
+    netlist_file = os.path.join(src_dir, "netlist.sv")
+    model_file = os.path.join(model_dir, "ref_model.v")
+    tb_file = os.path.join(tb_dir, "testbench.sv")
 
     vgen = VerilogGenerator(netlist, module_name="netlist", output_name="out",
                            testbench_name="testbench")
