@@ -22,17 +22,20 @@ except ModuleNotFoundError:
 class VerilogGenerator:
     """Generates SystemVerilog code from netlist."""
 
-    def __init__(self, netlist: Netlist, module_name: str = "circuit", output_name: str = "out"):
+    def __init__(self, netlist: Netlist, module_name: str = "circuit", output_name: str = "out",
+                 testbench_name: str = None):
         """Initialize generator.
 
         Args:
             netlist: Gate-level netlist
-            module_name: Name for the SystemVerilog module
+            module_name: Name for the SystemVerilog module (DUT)
             output_name: Name for the output port (default: "out")
+            testbench_name: Name for the testbench module (default: "{module_name}_tb")
         """
         self.netlist = netlist
         self.module_name = module_name
         self.output_name = output_name
+        self.testbench_name = testbench_name if testbench_name else f"{module_name}_tb"
 
     def generate_module(self, filename: str):
         """Generate SystemVerilog module file.
@@ -288,7 +291,7 @@ class VerilogGenerator:
         f.write(f"// Co-simulation testbench for {self.module_name}\n")
         f.write(f"// Compares gate-level netlist (DUT) against behavioral golden model\n")
         f.write(f"// Uses random stimulus for verification\n\n")
-        f.write(f"module {self.module_name}_tb;\n\n")
+        f.write(f"module {self.testbench_name};\n\n")
 
     def _write_tb_cosim_signals(self, f: TextIO):
         """Write co-simulation testbench signals."""
