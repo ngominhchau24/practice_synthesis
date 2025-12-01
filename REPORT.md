@@ -1,12 +1,12 @@
-LOGIC DESIGN AND SYNTHESIS
-LAB 3 REPORT
-BDD-Based Logic Synthesis
+## LOGIC DESIGN AND SYNTHESIS
+## LAB 3 REPORT
+## BDD-Based Logic Synthesis
 
-Ngo Minh Chau – 2470212
-Tran Gia Tuan – 2470214
-Dang Phuoc Tien – 2470455
+## Ngo Minh Chau – 2470212
+## Tran Gia Tuan – 2470214
+## Dang Phuoc Tien – 2470455
 
-December 1, 2025
+## December 1, 2025
 
 
 ## Introduction
@@ -50,7 +50,7 @@ synthesis/
 The BDD is constructed using Shannon's decomposition theorem:
 
 ```
-f(x₁, x₂, ..., xₙ) = x̄ᵢ · f(x₁, ..., xᵢ₋₁, 0, xᵢ₊₁, ..., xₙ) + xᵢ · f(x₁, ..., xᵢ₋₁, 1, xᵢ₊₁, ..., xₙ)
+f(x₁, x₂, ..., xₙ) = x̄ᵢ · f(x₁, ..., xᵢ₋₁, 0, xᵢ₊₁, ..., xₙ) +xᵢ · f(x₁, ..., xᵢ₋₁, 1, xᵢ₊₁, ..., xₙ)
                     = x̄ᵢ · f_low + xᵢ · f_high
 ```
 
@@ -396,7 +396,7 @@ DUT matches golden model on all test vectors!
 
 ```bash
 # Complete flow
-make all              # Clean, synthesize, build, run
+make all
 
 # Individual steps
 make synthesize       # Generate netlist from BDD
