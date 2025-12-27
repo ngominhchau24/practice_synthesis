@@ -1,0 +1,810 @@
+\UseRawInputEncoding
+\documentclass[12pt]{article}
+\usepackage[a4paper, margin=1in]{geometry}
+\usepackage{amsmath, amsfonts, amssymb}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{stmaryrd}
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  frame=single,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false
+}
+\usepackage{color}
+
+\begin{document}
+\setlength{\parindent}{0pt}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+
+    {\huge \textbf{LOGIC DESIGN AND SYNTHESIS}}\\[0.5cm]
+    {\LARGE \textit{LAB 1 REPORT}}\\[2cm]
+    \vfill
+    \begin{flushleft}
+
+    Ngo Minh Chau \hfill 2470212 \\
+    Tran Gia Tuan \hfill 2470214 \\
+    Dang Phuoc Tien \hfill 2470455 \\[1cm]
+
+    \end{flushleft}
+
+    \vfill
+
+    {\large \today}
+
+\end{titlepage}
+
+\newpage
+\section*{Introduction}
+This report presents a compact workflow for minimizing combinational logic using Karnaugh maps and the Quine–McCluskey algorithm with explicit support for don’t-care conditions. Functions are specified in sum-of-minterms form (optionally with d{…}), converted to a full truth table (0/1/–), and minimized by generating prime implicants from the ON ∪ DC set under a strict one-bit-difference rule, filtering out any implicants that cover OFF minterms, then selecting essential PIs and completing coverage via a greedy heuristic. The result is a clear Sum-of-Products expression and an Espresso-style .pla, illustrating how don’t cares enable larger merges and fewer literals while preserving functional correctness.
+
+\section*{Objectives}
+\begin{enumerate}
+  \item \textbf{Truth table to spec.} Accept a user-defined truth table with $N$ inputs and $M$ outputs (e.g., $N{=}3$, $M{=}2$). Optionally support generating a random table under user constraints.
+  \item \textbf{K-map grouping.} From the ON-sets (and optional don’t-cares), perform K–map style grouping to propose large cubes (visual/heuristic merges).
+  \item \textbf{Algorithmic minimization.} Apply the Quine--McCluskey (QMC) method to compute prime implicants and select a minimum cover (use essential implicants first, then a selection strategy for the remainder).
+  \item \textbf{Hybrid approach.} Combine K–map grouping with QMC: use K–map merges to seed or constrain QMC, improving readability while guaranteeing correctness of the final cover.
+  \item \textbf{PLA/Espresso export.} Emit a valid Espresso/PLA file with headers \texttt{.i N}, \texttt{.o M}, data rows \texttt{<INPUT\_CUBE> <OUTPUT\_VECTOR>} over \{0,1,-\}, and terminator \texttt{.e}.
+  \item \textbf{Readable formulas.} Produce minimized SOP expressions for $f_1,\dots,f_M$ using variable names $x_1,\dots,x_N$ (with $x_1$ as MSB), printing $x_k$ for logic~1 and $x_k'$ for logic~0.
+  \item \textbf{Correctness check.} Verify equivalence between the original truth table and the minimized outputs by re-evaluating all $2^N$ input combinations.
+  \item \textbf{Generalization.} Ensure the pipeline works for arbitrary $N$ and $M$ and handles per-output don’t-cares.
+\end{enumerate}
+
+\newpage
+\section*{Python Code for lab 1}
+\begin{lstlisting}
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+K-map / Quine–McCluskey Minimizer (with Don't Care) — Single File Version
+
+Features:
+  - Parse "sum-of-minterms" spec with optional don't-cares (d{...})
+  - Build truth table (with '0'/'1'/'-'), print as Markdown
+  - Generate random spec (with d{...}) on demand
+  - Derive Prime Implicants (strict 1-bit-diff combining)
+  - OFF-safe PI filtering (allowed to expand over DC, but NEVER cover OFF)
+  - Pick cover using EPI + greedy heuristic
+  - Emit Espresso-style .pla cubes
+
+CLI:
+  python3 kmap_synth_single.py random [N] [M] [on_ratio] [dc_ratio]
+  python3 kmap_synth_single.py spec.txt [N]
+"""
+
+# ========== IMPORTS ==========
+from __future__ import annotations
+import sys
+import itertools
+import random
+from typing import Dict, List, Optional, Set, Tuple
+
+# ============================================================
+# TASK 1 — TRUTH TABLE UTILITIES, SPEC PARSER, MARKDOWN PRINTER
+# ============================================================
+def gen_all_input_combinations(n_inputs: int) -> List[str]:
+    """Generate all binary input rows (as strings) for N inputs: '000'..'111'."""
+    if n_inputs < 1:
+        raise ValueError("n_inputs must be >= 1")
+    return [''.join(bits) for bits in itertools.product('01', repeat=n_inputs)]
+
+def build_outputs_from_minterm_indices(
+    n_inputs: int,
+    outputs_spec: Dict[str, Tuple[Set[int], Set[int]]],  # name -> (on_set, dc_set)
+) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Build truth table outputs from minterm indices.
+
+    Returns:
+      - inputs_bits: 2^N strings of N bits
+      - outputs_trits: 2^N strings of M chars with each char in {'0','1','-'}
+      - output_names: ordered list of output function names
+
+    Note:
+      '-' denotes don't care (used like '1' only during implicant grouping).
+    """
+    inputs_bits = gen_all_input_combinations(n_inputs)
+    max_index = (1 << n_inputs) - 1
+    out_names = sorted(outputs_spec.keys())
+
+    # helpful suggestion for N if some index > 2^N-1
+    needed = 0
+    for _, (on_set, dc_set) in outputs_spec.items():
+        if on_set:
+            needed = max(needed, max(on_set))
+        if dc_set:
+            needed = max(needed, max(dc_set))
+    needed_N = max(1, (needed + 1).bit_length())
+
+    # validate indices and overlap
+    for name, (on_set, dc_set) in outputs_spec.items():
+        bad_on = [i for i in on_set if i < 0 or i > max_index]
+        bad_dc = [i for i in dc_set if i < 0 or i > max_index]
+        if bad_on:
+            raise ValueError(
+                f"Output '{name}' has invalid ON indices: {bad_on} (N={n_inputs}). "
+                f"Max index seen={needed}. Try N={needed_N}."
+            )
+        if bad_dc:
+            raise ValueError(
+                f"Output '{name}' has invalid DC indices: {bad_dc} (N={n_inputs}). "
+                f"Max index seen={needed}. Try N={needed_N}."
+            )
+        if (on_set & dc_set):
+            raise ValueError(f"Output '{name}' has overlap between ON and DC: {sorted(on_set & dc_set)}")
+
+    # build M columns per row
+    rows: List[str] = []
+    for i in range(1 << n_inputs):
+        chars = []
+        for name in out_names:
+            on_set, dc_set = outputs_spec[name]
+            if i in on_set:
+                chars.append('1')
+            elif i in dc_set:
+                chars.append('-')
+            else:
+                chars.append('0')
+        rows.append(''.join(chars))
+    return inputs_bits, rows, out_names
+
+def parse_sum_of_minterms_file(path: str) -> Dict[str, Tuple[Set[int], Set[int]]]:
+    """
+    Parse extended syntax with don't cares:
+        f = sum{0,2,3,4} d{5,7}
+        g = sum{1,6} + d{0,3}
+        h = sum{} d{}
+
+    Returns: dict name -> (on_set, dc_set)
+    """
+    import re
+    spec: Dict[str, Tuple[Set[int], Set[int]]] = {}
+    pat = re.compile(
+        r"""^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*sum\s*\{\s*([0-9,\s]*)\s*\}\s*(?:\+?\s*d\s*\{\s*([0-9,\s]*)\s*\}\s*)?$"""
+    )
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = pat.match(line)
+            if not m:
+                raise ValueError(f"Line {lineno}: invalid format -> {raw.strip()}")
+            name, on_body, dc_body = m.group(1), m.group(2), m.group(3)
+
+            def parse_list(body: Optional[str]) -> Set[int]:
+                if body is None or body.strip() == "":
+                    return set()
+                xs = []
+                for tok in body.split(','):
+                    tok = tok.strip()
+                    if tok == "":
+                        continue
+                    xs.append(int(tok))
+                return set(xs)
+
+            on_set = parse_list(on_body)
+            dc_set = parse_list(dc_body)
+            spec[name] = (on_set, dc_set)
+    if not spec:
+        raise ValueError("No outputs found in the file.")
+    return spec
+
+def print_truth_table_markdown(
+    inputs_bits: List[str],
+    outputs_trits: List[str],
+    input_names: Optional[List[str]] = None,
+    output_names: Optional[List[str]] = None,
+) -> None:
+    """Pretty-print truth table as Markdown."""
+    if not inputs_bits or not outputs_trits:
+        print("_(empty truth table)_")
+        return
+    N = len(inputs_bits[0])
+    M = len(outputs_trits[0])
+    if input_names is None:
+        input_names = [f"x{i+1}" for i in range(N)]
+    if output_names is None:
+        output_names = [f"f{i+1}" for i in range(M)]
+
+    headers = input_names + output_names
+    print("| " + " | ".join(headers) + " |")
+    print("|" + "|".join(["---"] * len(headers)) + "|")
+    for xb, yb in zip(inputs_bits, outputs_trits):
+        row = list(xb) + list(yb)
+        print("| " + " | ".join(row) + " |")
+
+# ============================================================
+# TASK 2 — RANDOM SPEC GENERATION (sum{...} d{...})
+# ============================================================
+def _random_on_dc_indices(
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    on_ratio: float = 0.35,     # will be clamped to ≤ 0.5 by caller
+    dc_ratio: float = 0.15,
+    ensure_on: bool = True,
+    seed: Optional[int] = None,
+) -> Dict[str, Tuple[Set[int], Set[int]]]:
+    """
+    Randomize ON/DC sets per output f1..fM.
+    - ON and DC do not overlap.
+    """
+    R = random.Random(seed)
+    n_rows = 1 << n_inputs
+    max_on = max(0, int(0.5 * n_rows))
+    want_on = min(int(on_ratio * n_rows), max_on)
+    want_dc = max(0, int(dc_ratio * n_rows))
+
+    spec: Dict[str, Tuple[Set[int], Set[int]]] = {}
+    all_indices = list(range(n_rows))
+    for j in range(1, n_outputs + 1):
+        name = f"f{j}"
+        on_k = want_on
+        if ensure_on and on_k == 0 and max_on > 0:
+            on_k = 1
+        on_set = set(R.sample(all_indices, on_k)) if on_k > 0 else set()
+        remaining = [i for i in all_indices if i not in on_set]
+        dc_k = min(want_dc, len(remaining))
+        dc_set = set(R.sample(remaining, dc_k)) if dc_k > 0 else set()
+        spec[name] = (on_set, dc_set)
+    return spec
+
+def write_sum_of_minterms_file(
+    path: str,
+    spec: Dict[str, Tuple[Set[int], Set[int]]]
+) -> None:
+    """Write spec file as lines:  f = sum{...} d{...}"""
+    lines = []
+    for name in sorted(spec.keys()):
+        on_set, dc_set = spec[name]
+        on_part = ",".join(str(i) for i in sorted(on_set))
+        dc_part = ",".join(str(i) for i in sorted(dc_set))
+        if dc_set:
+            lines.append(f"{name} = sum{{{on_part}}} d{{{dc_part}}}")
+        else:
+            lines.append(f"{name} = sum{{{on_part}}}")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+def generate_random_spec_file(
+    path: str,
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    on_ratio: float = 0.35,
+    dc_ratio: float = 0.15,
+    ensure_on: bool = True,
+    seed: Optional[int] = None,
+) -> None:
+    """Public helper to create a random spec file on disk."""
+    spec = _random_on_dc_indices(
+        n_inputs=n_inputs,
+        n_outputs=n_outputs,
+        on_ratio=on_ratio,
+        dc_ratio=dc_ratio,
+        ensure_on=ensure_on,
+        seed=seed,
+    )
+    write_sum_of_minterms_file(path, spec)
+
+# ============================================================
+# TASK 3 — IMPLICANTS (STRICT COMBINE) & UTILITIES
+# ============================================================
+def combine_if_one_bit_diff(a: str, b: str) -> str | None:
+    """
+    STRICT RULE:
+      - a and b are identical except at exactly ONE position with 0/1 opposition;
+      - positions with '-' must be '-' in BOTH a and b (no '-' vs '0/1' merging).
+
+    Returns the combined implicant (with a single '-') or None if not combinable.
+    """
+    diff = 0
+    out = []
+    for xa, xb in zip(a, b):
+        if xa == xb:
+            out.append(xa)  # may be '0'/'1' or '-' (same on both)
+        else:
+            # If either side is '-', refuse to merge (keeps one-bit diff discipline)
+            if xa == '-' or xb == '-':
+                return None
+            # differing 0 vs 1 -> exactly one difference allowed
+            diff += 1
+            if diff > 1:
+                return None
+            out.append('-')
+    if diff != 1:
+        return None
+    return ''.join(out)
+
+def group_once(terms: List[str]) -> Tuple[List[str], List[str]]:
+    """One pass of pairwise combining; returns (new_terms, leftovers)."""
+    used = set()
+    new_terms_set: Set[str] = set()
+    terms_sorted = sorted(terms, key=lambda s: s.count('1'))
+    for i in range(len(terms_sorted)):
+        for j in range(i + 1, len(terms_sorted)):
+            c = combine_if_one_bit_diff(terms_sorted[i], terms_sorted[j])
+            if c is not None:
+                new_terms_set.add(c)
+                used.add(terms_sorted[i])
+                used.add(terms_sorted[j])
+    leftovers = [t for t in terms_sorted if t not in used]
+    new_terms = sorted(new_terms_set)
+    return new_terms, leftovers
+
+def implicant_covers_input(implicant: str, input_bits: str) -> bool:
+    """Check if implicant covers a particular input row (string)."""
+    return all(ic == '-' or ic == xb for ic, xb in zip(implicant, input_bits))
+
+def implicant_covers_implicant(a: str, b: str) -> bool:
+    """Return True if cube `a` contains cube `b`."""
+    return all(xa == '-' or xa == xb for xa, xb in zip(a, b))
+
+def derive_prime_implicants(minterms: List[str]) -> List[str]:
+    """
+    Generate Prime Implicants (PIs) from input minterms (as strings).
+    Uses iterative combining (group_once) and removes redundant cubes at the end.
+    """
+    current = sorted(set(minterms))
+    prime_implicants: Set[str] = set()
+    while True:
+        new_terms, leftovers = group_once(current)
+        prime_implicants.update(leftovers)
+        if not new_terms:
+            prime_implicants.update(current)
+            break
+        current = new_terms
+    pis = sorted(prime_implicants)
+
+    # remove redundant PIs that are covered by another PI
+    non_redundant: List[str] = []
+    for i, pi in enumerate(pis):
+        is_covered = any(i != j and implicant_covers_implicant(pj, pi) for j, pj in enumerate(pis))
+        if not is_covered:
+            non_redundant.append(pi)
+    return sorted(set(non_redundant))
+
+def build_onset_terms(inputs_bits: List[str], outputs_bits: List[str], out_index: int) -> List[str]:
+    """Helper (not used by CLI directly): collect ON-set rows for an output index."""
+    return [x for x, y in zip(inputs_bits, outputs_bits) if y[out_index] == '1']
+
+# ============================================================
+# TASK 4 — COVER SELECTION (EPI + GREEDY) with OFF-SAFE FILTER
+# ============================================================
+def build_minterm_to_pis(
+    inputs_bits: List[str],
+    onset_minterms: List[str],
+    pis: List[str]
+) -> Dict[int, Set[str]]:
+    """Map each ON minterm index -> set of covering PIs."""
+    idx_by_bits = {bits: idx for idx, bits in enumerate(inputs_bits)}
+    on_indices: Set[int] = set(idx_by_bits[b] for b in onset_minterms)
+    table: Dict[int, Set[str]] = {i: set() for i in on_indices}
+    for pi in pis:
+        for bits, idx in idx_by_bits.items():
+            if bits in onset_minterms and implicant_covers_input(pi, bits):
+                table[idx].add(pi)
+    return table
+
+def pick_epis(minterm_to_pis: Dict[int, Set[str]]) -> Tuple[Set[str], Set[int]]:
+    """Pick essential prime implicants (EPIs) and mark covered minterms."""
+    epis: Set[str] = set()
+    covered: Set[int] = set()
+    for m, cand in minterm_to_pis.items():
+        if len(cand) == 1:
+            epis.add(next(iter(cand)))
+    if epis:
+        for m, cand in minterm_to_pis.items():
+            if any(pi in cand for pi in epis):
+                covered.add(m)
+    return epis, covered
+
+def score_pi_for_greedy(pi: str, uncovered: Set[int], covers: Dict[str, Set[int]]) -> Tuple[int, int, int]:
+    """
+    Greedy score = (newly covered ON count, dash_count, -literal_count)
+    to prefer larger cubes (more '-') if equal coverage.
+    """
+    cover_gain = len(covers.get(pi, set()) & uncovered)
+    dash_count = pi.count('-')
+    literal_count = len(pi) - dash_count
+    return (cover_gain, dash_count, -literal_count)
+
+def greedy_complete_cover(
+    pis: List[str],
+    covers: Dict[str, Set[int]],
+    already_selected: Set[str],
+    all_on_indices: Set[int]
+) -> Tuple[Set[str], Set[int]]:
+    """Greedy completion after adding EPIs."""
+    selected = set(already_selected)
+    uncovered = set(all_on_indices)
+    for pi in selected:
+        uncovered -= covers.get(pi, set())
+    remaining = [pi for pi in pis if pi not in selected]
+    while uncovered:
+        best_pi, best_score = None, (0, 0, 0)
+        for pi in remaining:
+            sc = score_pi_for_greedy(pi, uncovered, covers)
+            if sc > best_score:
+                best_score, best_pi = sc, pi
+        if best_pi is None or best_score[0] == 0:
+            break
+        selected.add(best_pi)
+        uncovered -= covers.get(best_pi, set())
+        remaining = [pi for pi in remaining if pi != best_pi]
+    return selected, uncovered
+
+def implicant_to_product_term(implicant: str, var_names: Optional[List[str]] = None) -> str:
+    """Convert implicant (e.g., 1-0-) to a product term like x1 x3' ..."""
+    N = len(implicant)
+    if var_names is None:
+        var_names = [f"x{i+1}" for i in range(N)]
+    terms = []
+    for b, name in zip(implicant, var_names):
+        if b == '1':
+            terms.append(name)
+        elif b == '0':
+            terms.append(name + "'")
+    return ''.join(terms) if terms else "1"
+
+def build_sum_of_products(selected_pis: List[str], var_names: Optional[List[str]] = None) -> str:
+    """Join product terms with '+'."""
+    return ' + '.join(implicant_to_product_term(pi, var_names) for pi in selected_pis) if selected_pis else "0"
+
+def cubes_for_espresso(selected_pis: List[str], n_outputs: int, which_output: int) -> List[str]:
+    """Build Espresso cube lines like: '1-0- 100...010' (input part + output part)."""
+    out = []
+    for pi in selected_pis:
+        y = ['0'] * n_outputs
+        y[which_output] = '1'
+        out.append(f"{pi} {''.join(y)}")
+    return out
+
+def select_cover_for_one_output(
+    inputs_bits: List[str],
+    outputs_trits: List[str],
+    which_output: int,
+    input_var_names: Optional[List[str]] = None,
+) -> Tuple[List[str], Set[int], str, List[str]]:
+    """
+    Full flow for a single output:
+      - Build ON, DC, OFF
+      - Derive PIs from (ON ∪ DC)
+      - Filter-out any PI that would cover OFF
+      - EPI + greedy to cover ON
+      - Return (selected PIs, uncovered indices, SOP, Espresso cubes)
+    """
+    # Build ON, DC, OFF sets (as input bit strings)
+    onset_bits  = [x for x, y in zip(inputs_bits, outputs_trits) if y[which_output] == '1']
+    dcare_bits  = [x for x, y in zip(inputs_bits, outputs_trits) if y[which_output] == '-']
+    union_bits  = sorted(set(onset_bits) | set(dcare_bits))
+    off_bits    = set(inputs_bits) - set(union_bits)
+
+    # Derive PIs from (ON ∪ DC)
+    pis = derive_prime_implicants(union_bits)
+
+    # OFF-safe PI filtering: remove any PI that covers at least one OFF minterm
+    pis = [
+        pi for pi in pis
+        if not any(implicant_covers_input(pi, xoff) for xoff in off_bits)
+    ]
+
+    # Cover table restricted to ON
+    idx_by_bits = {bits: idx for idx, bits in enumerate(inputs_bits)}
+    on_indices: Set[int] = set(idx_by_bits[b] for b in onset_bits)
+
+    covers: Dict[str, Set[int]] = {}
+    for pi in pis:
+        indices = set()
+        for bits, idx in idx_by_bits.items():
+            if bits in onset_bits and implicant_covers_input(pi, bits):
+                indices.add(idx)
+        covers[pi] = indices
+
+    # Build minterm -> PIs mapping
+    minterm_to_pis: Dict[int, Set[str]] = {i: set() for i in on_indices}
+    for pi, covered_set in covers.items():
+        for i in covered_set:
+            if i in minterm_to_pis:
+                minterm_to_pis[i].add(pi)
+
+    # EPI and greedy complete cover
+    epis, _ = pick_epis(minterm_to_pis)
+    selected_all, uncovered = greedy_complete_cover(
+        pis=pis, covers=covers, already_selected=epis, all_on_indices=on_indices
+    )
+
+    selected_pis = sorted(selected_all)
+    sop = build_sum_of_products(selected_pis, var_names=input_var_names)
+    cubes = cubes_for_espresso(selected_pis, n_outputs=len(outputs_trits[0]), which_output=which_output)
+    return selected_pis, uncovered, sop, cubes
+
+# ============================================================
+# TASK 5 — PLA BUILDER
+# ============================================================
+def build_full_pla(
+    inputs_bits: List[str],
+    outputs_trits: List[str],
+    all_cubes: List[str],
+    input_names: Optional[List[str]] = None,
+    output_names: Optional[List[str]] = None,
+) -> str:
+    """
+    Build complete Espresso .pla text (header + cubes + .e).
+    Note: outputs_trits can contain '-' but cubes indicate asserted outputs only.
+    """
+    if not inputs_bits or not outputs_trits:
+        raise ValueError("inputs_bits/outputs are empty.")
+    N = len(inputs_bits[0])
+    M = len(outputs_trits[0])
+    if input_names is None:
+        input_names  = [f"x{i+1}" for i in range(N)]
+    if output_names is None:
+        output_names = [f"f{i+1}" for i in range(M)]
+    lines = []
+    lines.append(f".i {N}")
+    lines.append(f".o {M}")
+    lines.append(".ilb " + " ".join(input_names))
+    lines.append(".ob " + " ".join(output_names))
+    lines.extend(all_cubes)
+    lines.append(".e")
+    return "\n".join(lines)
+
+# ============================================================
+# TASK 6 — ORCHESTRATOR & CLI
+# ============================================================
+def run_from_sum_file(
+    path: str,
+    n_inputs: int,
+    input_names: Optional[List[str]] = None,
+    use_markdown: bool = True,
+) -> str:
+    """Parse spec, print Markdown truth table, minimize each output, print .pla."""
+    spec = parse_sum_of_minterms_file(path)               # name -> (on_set, dc_set)
+    inputs_bits, outputs_trits, out_names = build_outputs_from_minterm_indices(n_inputs, spec)
+
+    if input_names is None:
+        input_names = [f"x{i+1}" for i in range(n_inputs)]
+    output_names = out_names
+
+    # Print truth table
+    if use_markdown:
+        print_truth_table_markdown(inputs_bits, outputs_trits, input_names, output_names)
+
+    # Minimize each output
+    all_cubes: List[str] = []
+    for k in range(len(output_names)):
+        selected_pis, uncovered, sop, cubes = select_cover_for_one_output(
+            inputs_bits=inputs_bits,
+            outputs_trits=outputs_trits,
+            which_output=k,
+            input_var_names=input_names,
+        )
+        print(f"\n### {output_names[k]}")
+        print("PIs:", selected_pis)
+        if uncovered:
+            print("Warning: uncovered ON minterms (indices):", sorted(uncovered))
+        print("SOP:", sop)
+        all_cubes.extend(cubes)
+
+    # Emit PLA
+    pla_text = build_full_pla(inputs_bits, outputs_trits, all_cubes, input_names, output_names)
+    print("\n```pla")
+    print(pla_text)
+    print("```")
+    return pla_text
+
+def print_usage():
+    """Print CLI usage help."""
+    print(
+        "Usage:\n"
+        "  python3 kmap_synth_single.py random [N] [M] [on_ratio] [dc_ratio]\n"
+        "      -> Generate random_spec.txt then run it.\n"
+        "         Defaults: N=4, M=2, on_ratio=0.35, dc_ratio=0.15\n"
+        "\n"
+        "  python3 kmap_synth_single.py spec.txt [N]\n"
+        "      -> Run with provided spec file (supports d{...}); default N=3.\n"
+    )
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        print_usage()
+        return
+
+    mode = args[0].strip()
+
+    # Mode: random -> create random_spec.txt then run it
+    if mode.lower() == "random":
+        try:
+            N  = int(args[1]) if len(args) >= 2 else 4
+            M  = int(args[2]) if len(args) >= 3 else 2
+            on = float(args[3]) if len(args) >= 4 else 0.35
+            dc = float(args[4]) if len(args) >= 5 else 0.15
+        except ValueError:
+            print("Error: parameters must be numeric (N,M ints; on_ratio, dc_ratio floats).")
+            return
+
+        if on > 0.5:
+            print("Warning: on_ratio > 0.5 is clamped to 0.5.")
+            on = 0.5
+
+        out_path = "random_spec.txt"
+        generate_random_spec_file(
+            out_path, n_inputs=N, n_outputs=M,
+            on_ratio=on, dc_ratio=dc, ensure_on=True, seed=None
+        )
+        print(f"[i] Generated random spec -> {out_path}")
+        run_from_sum_file(path=out_path, n_inputs=N, use_markdown=True)
+        return
+
+    # Mode: spec file path, optional N
+    path = mode
+    try:
+        N = int(args[1]) if len(args) >= 2 else 3
+    except ValueError:
+        print("Error: N must be an integer.")
+        return
+    run_from_sum_file(path=path, n_inputs=N, use_markdown=True)
+
+if __name__ == "__main__":
+    main()
+
+\end{lstlisting}
+
+\newpage
+\section*{Console output}
+
+\begin{lstlisting}[language=Python, basicstyle=\ttfamily\small, frame=single]
+1. Random with parameters: N=4 inputs, M=3 outputs, on_ratio=0.4, dc_ratio=0.2
+$ python3 kmap_synth_single.py random 4 3 0.4 0.2
+[i] Generated random spec -> random_spec.txt
+| x1 | x2 | x3 | x4 | f1 | f2 | f3 |
+|---|---|---|---|---|---|---|
+| 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| 0 | 0 | 0 | 1 | 1 | 1 | 0 |
+| 0 | 0 | 1 | 0 | - | - | 1 |
+| 0 | 0 | 1 | 1 | 0 | 1 | 1 |
+| 0 | 1 | 0 | 0 | 1 | 1 | 0 |
+| 0 | 1 | 0 | 1 | 1 | 0 | - |
+| 0 | 1 | 1 | 0 | 0 | 0 | 1 |
+| 0 | 1 | 1 | 1 | 0 | - | 0 |
+| 1 | 0 | 0 | 0 | 0 | 0 | 1 |
+| 1 | 0 | 0 | 1 | 1 | 0 | - |
+| 1 | 0 | 1 | 0 | 1 | - | - |
+| 1 | 0 | 1 | 1 | 0 | 0 | 1 |
+| 1 | 1 | 0 | 0 | - | 0 | 0 |
+| 1 | 1 | 0 | 1 | 1 | 0 | 0 |
+| 1 | 1 | 1 | 0 | 0 | 1 | 0 |
+| 1 | 1 | 1 | 1 | - | 1 | 1 |
+
+### f1
+PIs: ['--01', '-010', '-10-']
+SOP: x3'x4 + x2'x3x4' + x2x3'
+
+### f2
+PIs: ['0-00', '00--', '111-']
+SOP: x1'x3'x4' + x1'x2' + x1x2x3
+
+### f3
+PIs: ['-01-', '0-10', '1-11', '10--']
+SOP: x2'x3 + x1'x3x4' + x1x3x4 + x1x2'
+
+```pla
+.i 4
+.o 3
+.ilb x1 x2 x3 x4
+.ob f1 f2 f3
+--01 100
+-010 100
+-10- 100
+0-00 010
+00-- 010
+111- 010
+-01- 001
+0-10 001
+1-11 001
+10-- 001
+.e
+```
+
+2. Random: generate random_spec.txt and run it (defaults: N=4, M=2)
+$ python3 kmap_synth_single.py random
+[i] Generated random spec -> random_spec.txt
+| x1 | x2 | x3 | x4 | f1 | f2 |
+|---|---|---|---|---|---|
+| 0 | 0 | 0 | 0 | 1 | 1 |
+| 0 | 0 | 0 | 1 | 1 | 0 |
+| 0 | 0 | 1 | 0 | 0 | 0 |
+| 0 | 0 | 1 | 1 | 0 | 0 |
+| 0 | 1 | 0 | 0 | 0 | - |
+| 0 | 1 | 0 | 1 | - | 0 |
+| 0 | 1 | 1 | 0 | 0 | 1 |
+| 0 | 1 | 1 | 1 | 0 | 0 |
+| 1 | 0 | 0 | 0 | 0 | 1 |
+| 1 | 0 | 0 | 1 | 1 | 0 |
+| 1 | 0 | 1 | 0 | 1 | 1 |
+| 1 | 0 | 1 | 1 | 0 | 0 |
+| 1 | 1 | 0 | 0 | 0 | 1 |
+| 1 | 1 | 0 | 1 | - | 0 |
+| 1 | 1 | 1 | 0 | 1 | - |
+| 1 | 1 | 1 | 1 | 0 | 0 |
+
+### f1
+PIs: ['--01', '000-', '1-10']
+SOP: x3'x4 + x1'x2'x3' + x1x3x4'
+
+### f2
+PIs: ['--00', '-1-0', '1--0']
+SOP: x3'x4' + x2x4' + x1x4'
+
+```pla
+.i 4
+.o 2
+.ilb x1 x2 x3 x4
+.ob f1 f2
+--01 10
+000- 10
+1-10 10
+--00 01
+-1-0 01
+1--0 01
+.e
+```
+
+3. Run with a spec file that includes don’t-cares (N=4 because the max minterm is 15)
+$ echo "F = sum{0,1,2,7,9,11,12,15} d{4,10}" > spec.txt
+$ python3 kmap_synth_single.py spec.txt 4
+| x1 | x2 | x3 | x4 | F |
+|---|---|---|---|---|
+| 0 | 0 | 0 | 0 | 1 |
+| 0 | 0 | 0 | 1 | 1 |
+| 0 | 0 | 1 | 0 | 1 |
+| 0 | 0 | 1 | 1 | 0 |
+| 0 | 1 | 0 | 0 | - |
+| 0 | 1 | 0 | 1 | 0 |
+| 0 | 1 | 1 | 0 | 0 |
+| 0 | 1 | 1 | 1 | 1 |
+| 1 | 0 | 0 | 0 | 0 |
+| 1 | 0 | 0 | 1 | 1 |
+| 1 | 0 | 1 | 0 | - |
+| 1 | 0 | 1 | 1 | 1 |
+| 1 | 1 | 0 | 0 | 1 |
+| 1 | 1 | 0 | 1 | 0 |
+| 1 | 1 | 1 | 0 | 0 |
+| 1 | 1 | 1 | 1 | 1 |
+
+### F
+PIs: ['-001', '-100', '-111', '00-0', '1-11']
+SOP: x2'x3'x4 + x2x3'x4' + x2x3x4 + x1'x2'x4' + x1x3x4
+
+```pla
+.i 4
+.o 1
+.ilb x1 x2 x3 x4
+.ob F
+-001 1
+-100 1
+-111 1
+00-0 1
+1-11 1
+.e
+```
+\end{lstlisting}
+
+\section*{Conclusion}
+This lab delivered a compact, end-to-end flow for logic minimization—implemented as a single Python script—from a sum-of-minterms spec (with optional don’t-cares) to a Markdown truth table, prime-implicant/essential-PI selection, a minimal Sum-of-Products form, and an Espresso-style .pla. Treating don’t-cares as 1 only during grouping enabled larger merges and fewer literals, while strict one-bit combination plus OFF-safe filtering ensured correctness. The Quine–McCluskey procedure, completed with a simple greedy step, aligns with K-map intuition yet scales better to higher-variable cases. Potential extensions include automatic input-width inference, joint multi-output optimization, and cost-aware objectives (gate count or delay).
+
+\end{document}
